@@ -1,4 +1,4 @@
-import { getAssetFromKV, mapRequestToAsset } from '@cloudflare/kv-asset-handler'
+import { getAssetFromKV, mapRequestToAsset } from '@cloudflare/kv-asset-handler';
 
 /**
  * The DEBUG flag will do two things that help during development:
@@ -7,87 +7,91 @@ import { getAssetFromKV, mapRequestToAsset } from '@cloudflare/kv-asset-handler'
  * 2. we will return an error message on exception in your Response rather
  *    than the default 404.html page.
  */
-const DEBUG = false
+const DEBUG = false;
 
-addEventListener('fetch', event => {
+addEventListener('fetch', (event) => {
   try {
-    event.respondWith(handleEvent(event))
+    event.respondWith(handleEvent(event));
   } catch (e) {
     if (DEBUG) {
       return event.respondWith(
         new Response(e.message || e.toString(), {
           status: 500,
         }),
-      )
+      );
     }
-    event.respondWith(new Response('Internal Error', { status: 500 }))
+    event.respondWith(new Response('Internal Error', { status: 500 }));
   }
-})
+});
+
+function addCustomHeaders(requestURL, response) {
+  const regex = new RegExp(/\S+\/(js|css|img)\/\S+/);
+  const { headers } = response;
+
+  // Set caching headers
+  if (regex.test(requestURL)) {
+    // For assets with hashes in filename we can instruct the browser to cache without
+    // revalidation.
+    headers.append('Cache-Control', 'public, max-age=31536000, immutable');
+  } else {
+    // All other files should always be revalidated
+    headers.append('Cache-Control', 'must-revalidate');
+  }
+
+  // Security headers
+  headers.append('X-Frame-Options', 'DENY');
+  headers.append('X-Content-Type-Options', 'nosniff');
+  headers.append('X-XSS-Protection', '1; mode=block');
+  headers.append('Referrer-Policy', 'no-referrer');
+}
 
 async function handleEvent(event) {
-  const url = new URL(event.request.url)
-  let options = {}
+  const url = new URL(event.request.url);
+  const options = {};
 
-  /**
-   * You can add custom logic to how we fetch your assets
-   * by configuring the function `mapRequestToAsset`
-   */
-  // options.mapRequestToAsset = handlePrefix(/^\/docs/)
+  options.mapRequestToAsset = (req) => {
+    // First let's apply the default handler, which we imported from
+    // '@cloudflare/kv-asset-handler' at the top of the file. We do
+    // this because the default handler already has logic to detect
+    // paths that should map to HTML files, for which it appends
+    // `/index.html` to the path.
+    req = mapRequestToAsset(req);
+
+    // Now we can detect if the default handler decided to map to
+    // index.html in some specific directory.
+    if (req.url.endsWith('/index.html')) {
+      // Indeed. Let's change it to instead map to the root `/index.html`.
+      // This avoids the need to do a redundant lookup that we know will
+      // fail.
+      return new Request(`${new URL(req.url).origin}/index.html`, req);
+    }
+    // The default handler decided this is not an HTML page. It's probably
+    // an image, CSS, or JS file. Leave it as-is.
+    return req;
+  };
 
   try {
     if (DEBUG) {
       // customize caching
       options.cacheControl = {
         bypassCache: true,
-      }
+      };
     }
-
-    const page = await getAssetFromKV(event, options)
-
-    // allow headers to be altered
-    const response = new Response(page.body, page)
-
-    response.headers.set('X-XSS-Protection', '1; mode=block')
-    response.headers.set('X-Content-Type-Options', 'nosniff')
-    response.headers.set('X-Frame-Options', 'DENY')
-    response.headers.set('Referrer-Policy', 'unsafe-url')
-    response.headers.set('Feature-Policy', 'none')
-
-    return response
-
+    const response = await getAssetFromKV(event, options);
+    addCustomHeaders(url, response);
+    return response;
   } catch (e) {
     // if an error is thrown try to serve the asset at 404.html
     if (!DEBUG) {
       try {
-        let notFoundResponse = await getAssetFromKV(event, {
-          mapRequestToAsset: req => new Request(`${new URL(req.url).origin}/404.html`, req),
-        })
+        const notFoundResponse = await getAssetFromKV(event, {
+          mapRequestToAsset: (req) => new Request(`${new URL(req.url).origin}/404.html`, req),
+        });
 
-        return new Response(notFoundResponse.body, { ...notFoundResponse, status: 404 })
+        return new Response(notFoundResponse.body, { ...notFoundResponse, status: 404 });
       } catch (e) {}
     }
 
-    return new Response(e.message || e.toString(), { status: 500 })
-  }
-}
-
-/**
- * Here's one example of how to modify a request to
- * remove a specific prefix, in this case `/docs` from
- * the url. This can be useful if you are deploying to a
- * route on a zone, or if you only want your static content
- * to exist at a specific path.
- */
-function handlePrefix(prefix) {
-  return request => {
-    // compute the default (e.g. / -> index.html)
-    let defaultAssetKey = mapRequestToAsset(request)
-    let url = new URL(defaultAssetKey.url)
-
-    // strip the prefix from the path for lookup
-    url.pathname = url.pathname.replace(prefix, '/')
-
-    // inherit all other props from the default request
-    return new Request(url.toString(), defaultAssetKey)
+    return new Response(e.message || e.toString(), { status: 500 });
   }
 }
